@@ -5,3 +5,5 @@ Completeness_783.csv
 Connectivity_783.parquet
 results
 output
+results/
+output/
