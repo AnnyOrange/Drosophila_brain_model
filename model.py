@@ -40,6 +40,15 @@ default_params = {
     'r_poi2'    :   0*Hz,                 # default rate of a 2nd class of Poisson inputs
     'f_poi'     : 250,                    # scaling factor for Poisson synapse; 250 is sufficient to cause spiking
 
+    ### NEW: Background Noise Parameters ####################################
+    # 为了维持 1-5 Hz 的基线放电，我们需要向电导 g 注入持续的噪音。
+    # 这里的 rate 代表聚合后的背景输入频率（假设来自成千上万个未建模的突触）。
+    # 您可能需要微调 r_bg 和 w_bg 来校准输出频率正好落在 1-5 Hz 区间。
+    'use_bg'    : True,                   # Whether to use background Poisson noise
+    'r_bg'      : 2000 * Hz,              # Rate of background Poisson noise (per neuron)
+    'w_bg'      : .5 * mV,              # Weight of background noise spikes
+
+
     # equations for neurons               # alpha synapse https://doi.org/10.1017/CBO9780511815706; See https://brian2.readthedocs.io/en/stable/user/converting_from_integrated_form.html
     'eqs'       : dedent(''' 
                     dv/dt = (v_0 - v + g) / t_mbr : volt (unless refractory)
@@ -185,7 +194,21 @@ def create_model(path_comp, path_con, params):
     # object to record spikes
     spk_mon = SpikeMonitor(neu) 
 
-    return neu, syn, spk_mon
+    ### NEW: Create Background Poisson Input ###############################
+    # 这将为 neu 组中的每一个神经元创建一个独立的泊松输入源。
+    # 我们针对变量 'g' (conductance) 进行注入，这样噪音会随 tau 衰减，更符合突触动力学。
+    if params.get('use_bg', True):
+        bg_noise = PoissonInput(
+            target=neu,
+            target_var='g',     # Target conductance to allow decay
+            N=1,                # 1 input channel per neuron (representing aggregate)
+            rate=params['r_bg'],
+            weight=params['w_bg']
+        )
+    else:
+        bg_noise = None
+
+    return neu, syn, spk_mon, bg_noise
 
 #####################
 # running simulations
@@ -276,13 +299,16 @@ def run_trial(exc, exc2, slnc, path_comp, path_con, params):
     '''
 
     # get default network
-    neu, syn, spk_mon = create_model(path_comp, path_con, params)
+    neu, syn, spk_mon, bg_noise = create_model(path_comp, path_con, params)
     # define Poisson input for excitation
     poi_inp, neu = poi(neu, exc, exc2, params)
     # silence neurons
     syn = silence(slnc, syn)
     # collect in Network object
-    net = Network(neu, syn, spk_mon, *poi_inp)
+    objs = [neu, syn, spk_mon]
+    if bg_noise is not None:
+        objs.append(bg_noise)
+    net = Network(*objs, *poi_inp)
 
     # run simulation
     net.run(duration=params['t_run'])
@@ -295,7 +321,7 @@ def run_trial(exc, exc2, slnc, path_comp, path_con, params):
 
 def run_exp(exp_name, neu_exc, path_res, path_comp, path_con,
             params=default_params, neu_slnc=[], neu_exc2=[], 
-            n_proc=-1, force_overwrite=False):
+            n_proc=-1, force_overwrite=True):
     '''
     Run default network experiment 
     Neurons in `neu_exc` are Poisson external inputs
